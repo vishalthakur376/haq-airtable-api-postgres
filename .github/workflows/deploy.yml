@@ -1,0 +1,38 @@
+name: Deploy Airtable API Lambda
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Package Lambda
+        run: |
+          zip -r lambda.zip . -x "*.git*" "node_modules/*" ".github/*"
+          cd node_modules && zip -r ../lambda.zip . && cd ..
+        
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-2
+          
+      - name: Deploy to Lambda
+        run: |
+          aws lambda update-function-code \
+            --function-name haq-airtable-api \
+            --zip-file fileb://lambda.zip \
+            --region us-east-2
