@@ -1,20 +1,25 @@
 /**
  * HAQ Airtable-Compatible REST API for PostgreSQL
- * Version: 2.0 - Full CRUD Support with Tenant Filtering
+ * Version: 3.0 - Full CRUD Support with Pagination
  * 
  * ARCHITECTURE NOTE:
  * ==================
  * - All PostgreSQL table structures match Airtable exactly (same column names)
  * - This API uses an Airtable-compatible adapter to maintain feature parity
  * - Supports filterByFormula syntax for seamless frontend migration
+ * - Supports Airtable-style pagination with offset
  * - Chat and Portal both use this same adapter pattern
  * 
  * Endpoints:
- * - GET    /v0/{baseId}/{tableName}              - List records
+ * - GET    /v0/{baseId}/{tableName}              - List records (supports pagination)
  * - GET    /v0/{baseId}/{tableName}/{recordId}   - Get single record
  * - POST   /v0/{baseId}/{tableName}              - Create record
  * - PATCH  /v0/{baseId}/{tableName}/{recordId}   - Update record
  * - DELETE /v0/{baseId}/{tableName}/{recordId}   - Delete record
+ * 
+ * Pagination params:
+ * - maxRecords: number of records per page (default 1000, max 10000)
+ * - offset: pagination cursor for next page
  */
 
 const { Pool } = require('pg');
@@ -191,8 +196,15 @@ async function parseFilterFormula(formula, tableName, client) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
- * GET /v0/{baseId}/{tableName} - List records
+ * GET /v0/{baseId}/{tableName} - List records with pagination
  * GET /v0/{baseId}/{tableName}/{recordId} - Get single record
+ * 
+ * Query params:
+ * - maxRecords: number of records (default 1000, max 10000)
+ * - offset: pagination offset (number)
+ * - filterByFormula: Airtable-style filter
+ * - sort[0][field]: field to sort by
+ * - sort[0][direction]: 'asc' or 'desc'
  */
 async function handleGet(pool, tableName, recordId, queryParams) {
   const client = await pool.connect();
@@ -215,8 +227,9 @@ async function handleGet(pool, tableName, recordId, queryParams) {
       return { statusCode: 200, body: rowToRecord(result.rows[0]) };
     }
     
-    // List records
+    // List records with pagination
     let sql = `SELECT * FROM "${normalizedTable}"`;
+    let countSql = `SELECT COUNT(*) FROM "${normalizedTable}"`;
     let params = [];
     
     // Parse filterByFormula
@@ -224,29 +237,51 @@ async function handleGet(pool, tableName, recordId, queryParams) {
       const filter = await parseFilterFormula(queryParams.filterByFormula, normalizedTable, client);
       if (filter.sql) {
         sql += ` ${filter.sql}`;
+        countSql += ` ${filter.sql}`;
         params = filter.params;
       }
     }
     
-    // Add sorting
+    // Add sorting (default to id for consistent pagination)
     if (queryParams['sort[0][field]']) {
       const sortField = queryParams['sort[0][field]'];
       const sortDir = queryParams['sort[0][direction]'] === 'desc' ? 'DESC' : 'ASC';
-      sql += ` ORDER BY "${sortField}" ${sortDir} NULLS LAST`;
+      sql += ` ORDER BY "${sortField}" ${sortDir} NULLS LAST, "id" ASC`;
+    } else {
+      sql += ` ORDER BY "id" ASC`;
     }
     
-    // Add limit
-    const maxRecords = parseInt(queryParams.maxRecords) || 100;
-    sql += ` LIMIT ${maxRecords}`;
+    // Pagination
+    const maxRecords = Math.min(parseInt(queryParams.maxRecords) || 1000, 10000);
+    const offset = parseInt(queryParams.offset) || 0;
     
-    console.log(`[GET] ${normalizedTable}: ${sql}`);
+    sql += ` LIMIT ${maxRecords + 1}`; // Fetch one extra to check if there are more
+    if (offset > 0) {
+      sql += ` OFFSET ${offset}`;
+    }
+    
+    console.log(`[GET] ${normalizedTable}: ${sql} (offset: ${offset})`);
+    
+    // Execute query
     const result = await client.query(sql, params);
+    
+    // Check if there are more records
+    const hasMore = result.rows.length > maxRecords;
+    const records = hasMore ? result.rows.slice(0, maxRecords) : result.rows;
+    
+    // Build response
+    const response = {
+      records: records.map(rowToRecord)
+    };
+    
+    // Add offset for next page if there are more records
+    if (hasMore) {
+      response.offset = (offset + maxRecords).toString();
+    }
     
     return {
       statusCode: 200,
-      body: {
-        records: result.rows.map(rowToRecord)
-      }
+      body: response
     };
     
   } finally {
