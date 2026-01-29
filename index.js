@@ -1,13 +1,12 @@
 /**
  * HAQ Airtable-Compatible REST API for PostgreSQL
- * Version: 3.0 - Full CRUD + Linked Record Resolution
+ * Version: 2.0 - Full CRUD Support with Tenant Filtering
  * 
  * ARCHITECTURE NOTE:
  * ==================
  * - All PostgreSQL table structures match Airtable exactly (same column names)
  * - This API uses an Airtable-compatible adapter to maintain feature parity
  * - Supports filterByFormula syntax for seamless frontend migration
- * - Resolves linked records for treatment_plans (patient, report, results)
  * - Chat and Portal both use this same adapter pattern
  * 
  * Endpoints:
@@ -105,206 +104,6 @@ function generateRecordId() {
     id += chars[Math.floor(Math.random() * chars.length)];
   }
   return id;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Linked Record Resolution
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/**
- * Extract record ID from link field (handles JSON array format)
- */
-function extractRecordId(linkValue) {
-  if (!linkValue) return null;
-  
-  // If it's a JSON array like ["recXXX"], extract the ID
-  if (typeof linkValue === 'string') {
-    if (linkValue.startsWith('[')) {
-      try {
-        const arr = JSON.parse(linkValue);
-        return arr[0] || null;
-      } catch (e) {
-        return linkValue;
-      }
-    }
-    return linkValue;
-  }
-  
-  // If it's already an array
-  if (Array.isArray(linkValue)) {
-    return linkValue[0] || null;
-  }
-  
-  return linkValue;
-}
-
-/**
- * Resolve linked records for treatment_plans
- * Fetches patient details, report details, and related results
- */
-async function resolveLinkedRecords(client, records, tableName) {
-  // Only resolve for treatment_plans
-  if (tableName !== 'treatment_plans') {
-    return records;
-  }
-  
-  // Collect all linked IDs
-  const patientIds = new Set();
-  const reportIds = new Set();
-  
-  for (const record of records) {
-    const patientId = extractRecordId(record.fields.patient_id_link);
-    const reportId = extractRecordId(record.fields.report_id_link);
-    if (patientId) patientIds.add(patientId);
-    if (reportId) reportIds.add(reportId);
-  }
-  
-  // Fetch patients
-  const patientMap = {};
-  if (patientIds.size > 0) {
-    const patientIdsArray = Array.from(patientIds);
-    const placeholders = patientIdsArray.map((_, i) => `$${i + 1}`).join(', ');
-    const patientResult = await client.query(
-      `SELECT * FROM patients WHERE airtable_record_id IN (${placeholders})`,
-      patientIdsArray
-    );
-    for (const row of patientResult.rows) {
-      patientMap[row.airtable_record_id] = row;
-    }
-  }
-  
-  // Fetch reports
-  const reportMap = {};
-  if (reportIds.size > 0) {
-    const reportIdsArray = Array.from(reportIds);
-    const placeholders = reportIdsArray.map((_, i) => `$${i + 1}`).join(', ');
-    const reportResult = await client.query(
-      `SELECT * FROM reports WHERE airtable_record_id IN (${placeholders})`,
-      reportIdsArray
-    );
-    for (const row of reportResult.rows) {
-      reportMap[row.airtable_record_id] = row;
-    }
-  }
-  
-  // Fetch results for all reports (for key lab findings)
-  const resultsMap = {};
-  if (reportIds.size > 0) {
-    const reportIdsArray = Array.from(reportIds);
-    // Results link to reports via report_id_link field
-    const resultsResult = await client.query(
-      `SELECT * FROM results WHERE report_id_link IS NOT NULL`
-    );
-    for (const row of resultsResult.rows) {
-      const reportId = extractRecordId(row.report_id_link);
-      if (reportId) {
-        if (!resultsMap[reportId]) resultsMap[reportId] = [];
-        resultsMap[reportId].push(row);
-      }
-    }
-  }
-  
-  // Fetch functional intake for patients (for questionnaire findings)
-  const intakeMap = {};
-  if (patientIds.size > 0) {
-    const patientIdsArray = Array.from(patientIds);
-    const intakeResult = await client.query(
-      `SELECT * FROM functional_intake WHERE patient_id_link IS NOT NULL`
-    );
-    for (const row of intakeResult.rows) {
-      const patientId = extractRecordId(row.patient_id_link);
-      if (patientId) {
-        intakeMap[patientId] = row;
-      }
-    }
-  }
-  
-  // Enrich records with linked data
-  for (const record of records) {
-    const patientId = extractRecordId(record.fields.patient_id_link);
-    const reportId = extractRecordId(record.fields.report_id_link);
-    
-    // Add patient data
-    if (patientId && patientMap[patientId]) {
-      const patient = patientMap[patientId];
-      record.fields._patient = {
-        id: patient.airtable_record_id,
-        patient_id: patient.patient_id,
-        first_name: patient.first_name,
-        last_name: patient.last_name,
-        full_name: `${patient.first_name || ''} ${patient.last_name || ''}`.trim(),
-        email: patient.email,
-        dob: patient.dob,
-        sex: patient.sex,
-        partner_id: patient.partner_id
-      };
-    }
-    
-    // Add report data
-    if (reportId && reportMap[reportId]) {
-      const report = reportMap[reportId];
-      record.fields._report = {
-        id: report.airtable_record_id,
-        report_id: report.report_id,
-        sample_date: report.sample_date,
-        report_type: report.report_type,
-        lab_name: report.lab_name
-      };
-    }
-    
-    // Add key lab findings (results outside optimal range)
-    if (reportId && resultsMap[reportId]) {
-      const results = resultsMap[reportId];
-      // Filter for results outside optimal range
-      const outsideOptimal = results.filter(r => {
-        const status = (r.status || r.result_status || '').toLowerCase();
-        return status === 'high' || status === 'low' || status === 'critical' || 
-               status === 'outside_optimal' || status === 'abnormal';
-      }).slice(0, 10); // Limit to top 10
-      
-      record.fields._key_lab_findings = outsideOptimal.map(r => ({
-        marker_name: r.marker_name || r.test_name || r.analyte,
-        value: r.result_value || r.value,
-        unit: r.unit || r.units,
-        status: r.status || r.result_status,
-        optimal_range: r.optimal_range || `${r.optimal_low || ''}-${r.optimal_high || ''}`.trim()
-      }));
-    }
-    
-    // Add key questionnaire findings (low scores)
-    if (patientId && intakeMap[patientId]) {
-      const intake = intakeMap[patientId];
-      const lowScoreFindings = [];
-      
-      // Check various intake fields for low scores
-      const scoreFields = [
-        'energy_score', 'sleep_score', 'stress_score', 'digestion_score',
-        'mood_score', 'cognition_score', 'pain_score', 'exercise_score'
-      ];
-      
-      for (const field of scoreFields) {
-        if (intake[field] !== null && intake[field] !== undefined) {
-          const score = parseFloat(intake[field]);
-          if (!isNaN(score) && score <= 3) { // Low score threshold
-            lowScoreFindings.push({
-              category: field.replace('_score', '').replace(/_/g, ' '),
-              score: score,
-              max_score: 10
-            });
-          }
-        }
-      }
-      
-      // Also check chief complaints
-      if (intake.chief_complaint || intake.primary_concerns) {
-        record.fields._chief_complaints = intake.chief_complaint || intake.primary_concerns;
-      }
-      
-      record.fields._key_questionnaire_findings = lowScoreFindings;
-    }
-  }
-  
-  return records;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -413,12 +212,7 @@ async function handleGet(pool, tableName, recordId, queryParams) {
         return { statusCode: 404, body: { error: 'Record not found' } };
       }
       
-      let records = [rowToRecord(result.rows[0])];
-      
-      // Resolve linked records
-      records = await resolveLinkedRecords(client, records, normalizedTable);
-      
-      return { statusCode: 200, body: records[0] };
+      return { statusCode: 200, body: rowToRecord(result.rows[0]) };
     }
     
     // List records
@@ -448,17 +242,10 @@ async function handleGet(pool, tableName, recordId, queryParams) {
     console.log(`[GET] ${normalizedTable}: ${sql}`);
     const result = await client.query(sql, params);
     
-    let records = result.rows.map(rowToRecord);
-    
-    // Resolve linked records for treatment_plans
-    if (normalizedTable === 'treatment_plans') {
-      records = await resolveLinkedRecords(client, records, normalizedTable);
-    }
-    
     return {
       statusCode: 200,
       body: {
-        records
+        records: result.rows.map(rowToRecord)
       }
     };
     
