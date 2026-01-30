@@ -73,8 +73,13 @@ const corsHeaders = {
 function rowToRecord(row) {
   const fields = {};
   
+  // Always include the PostgreSQL numeric id in fields for proper identification
+  if (row.id) {
+    fields.pg_id = row.id;
+  }
+  
   for (const [key, value] of Object.entries(row)) {
-    // Skip internal columns
+    // Skip internal columns from being duplicated
     if (key === 'id' || key === 'airtable_record_id' || key === 'airtable_created_time') {
       continue;
     }
