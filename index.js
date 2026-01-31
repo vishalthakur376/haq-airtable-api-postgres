@@ -1,6 +1,6 @@
 /**
  * HAQ Airtable-Compatible REST API for PostgreSQL
- * Version: 3.0 - Full CRUD Support with Pagination
+ * Version: 3.1 - Full CRUD Support with Pagination + NPI Verification
  * 
  * ARCHITECTURE NOTE:
  * ==================
@@ -16,6 +16,7 @@
  * - POST   /v0/{baseId}/{tableName}              - Create record
  * - PATCH  /v0/{baseId}/{tableName}/{recordId}   - Update record
  * - DELETE /v0/{baseId}/{tableName}/{recordId}   - Delete record
+ * - GET    /npi/{npiNumber}                      - Verify NPI (CMS Registry proxy)
  * 
  * Pagination params:
  * - maxRecords: number of records per page (default 1000, max 10000)
@@ -23,6 +24,7 @@
  */
 
 const { Pool } = require('pg');
+const https = require('https');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -61,6 +63,39 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With'
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NPI Verification (CMS Registry Proxy)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Verify NPI number using CMS NPI Registry API
+ * Proxies the request to avoid CORS issues in browser
+ */
+async function verifyNPI(npiNumber) {
+  return new Promise((resolve, reject) => {
+    const url = `https://npiregistry.cms.hhs.gov/api/?number=${npiNumber}&version=2.1`;
+    
+    https.get(url, (res) => {
+      let data = '';
+      
+      res.on('data', (chunk) => {
+        data += chunk;
+      });
+      
+      res.on('end', () => {
+        try {
+          const json = JSON.parse(data);
+          resolve(json);
+        } catch (e) {
+          reject(new Error('Invalid response from NPI Registry'));
+        }
+      });
+    }).on('error', (err) => {
+      reject(err);
+    });
+  });
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Airtable Record Format
@@ -423,15 +458,43 @@ exports.handler = async (event) => {
   }
 
   try {
-    // Parse request path: /v0/{baseId}/{tableName} or /v0/{baseId}/{tableName}/{recordId}
     const path = event.path || event.rawPath;
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // NPI Verification Endpoint: GET /npi/{npiNumber}
+    // ═══════════════════════════════════════════════════════════════════════════
+    const npiMatch = path.match(/\/npi\/(\d{10})$/);
+    if (npiMatch && method === 'GET') {
+      const npiNumber = npiMatch[1];
+      console.log(`[NPI] Verifying NPI: ${npiNumber}`);
+      
+      try {
+        const npiData = await verifyNPI(npiNumber);
+        return {
+          statusCode: 200,
+          headers: corsHeaders,
+          body: JSON.stringify(npiData)
+        };
+      } catch (err) {
+        console.error('[NPI] Error:', err);
+        return {
+          statusCode: 502,
+          headers: corsHeaders,
+          body: JSON.stringify({ error: 'Failed to verify NPI', details: err.message })
+        };
+      }
+    }
+    
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Standard Airtable-compatible API: /v0/{baseId}/{tableName}
+    // ═══════════════════════════════════════════════════════════════════════════
     const match = path.match(/\/v0\/([^/]+)\/([^/]+)(?:\/([^/]+))?/);
     
     if (!match) {
       return {
         statusCode: 400,
         headers: corsHeaders,
-        body: JSON.stringify({ error: 'Invalid path. Expected: /v0/{baseId}/{tableName}' })
+        body: JSON.stringify({ error: 'Invalid path. Expected: /v0/{baseId}/{tableName} or /npi/{npiNumber}' })
       };
     }
     
