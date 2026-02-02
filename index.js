@@ -1,6 +1,6 @@
 /**
  * HAQ Airtable-Compatible REST API for PostgreSQL
- * Version: 3.1 - Full CRUD Support with Pagination + NPI Verification
+ * Version: 3.2 - Fix string boolean conversion (needs_review 'false' → false)
  * 
  * ARCHITECTURE NOTE:
  * ==================
@@ -128,6 +128,11 @@ function rowToRecord(row) {
         // Keep as string if not valid JSON
       }
     }
+    
+    // v3.2: Convert string booleans to actual booleans for proper JS handling
+    // This fixes the "flagged" badge showing for needs_review='false'
+    if (parsedValue === 'true') parsedValue = true;
+    if (parsedValue === 'false') parsedValue = false;
     
     fields[key] = parsedValue;
   }
