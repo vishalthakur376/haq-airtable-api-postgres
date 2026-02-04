@@ -1,6 +1,6 @@
 /**
  * HAQ Airtable-Compatible REST API for PostgreSQL
- * Version: 3.2 - Fix string boolean conversion (needs_review 'false' → false)
+ * Version: 3.3 - Auto-create Cognito user when creating users record
  * 
  * ARCHITECTURE NOTE:
  * ==================
@@ -25,6 +25,11 @@
 
 const { Pool } = require('pg');
 const https = require('https');
+const { CognitoIdentityProviderClient, AdminCreateUserCommand, AdminSetUserPasswordCommand } = require('@aws-sdk/client-cognito-identity-provider');
+
+// Cognito configuration
+const COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || 'us-east-2_k0wuHxKK2';
+const cognitoClient = new CognitoIdentityProviderClient({ region: 'us-east-2' });
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -344,13 +349,53 @@ async function handlePost(pool, tableName, body) {
     const normalizedTable = tableName.toLowerCase().replace(/[^a-z0-9_]/g, '_');
     const fields = body.fields || body;
     
-    // Build INSERT statement
+    // v3.3: If creating a user with email/password, also create Cognito user
+    if (normalizedTable === 'users' && fields.email && fields.password) {
+      try {
+        console.log(`[COGNITO] Creating user: ${fields.email}`);
+        
+        // Create Cognito user
+        const createCommand = new AdminCreateUserCommand({
+          UserPoolId: COGNITO_USER_POOL_ID,
+          Username: fields.email,
+          UserAttributes: [
+            { Name: 'email', Value: fields.email },
+            { Name: 'email_verified', Value: 'true' }
+          ],
+          MessageAction: 'SUPPRESS' // Don't send welcome email
+        });
+        await cognitoClient.send(createCommand);
+        
+        // Set permanent password
+        const passwordCommand = new AdminSetUserPasswordCommand({
+          UserPoolId: COGNITO_USER_POOL_ID,
+          Username: fields.email,
+          Password: fields.password,
+          Permanent: true
+        });
+        await cognitoClient.send(passwordCommand);
+        
+        console.log(`[COGNITO] User created successfully: ${fields.email}`);
+      } catch (cognitoError) {
+        console.error(`[COGNITO] Error creating user: ${cognitoError.message}`);
+        // If user already exists, continue with DB creation
+        if (cognitoError.name !== 'UsernameExistsException') {
+          throw new Error(`Cognito error: ${cognitoError.message}`);
+        }
+        console.log(`[COGNITO] User already exists, continuing with DB record`);
+      }
+    }
+    
+    // Build INSERT statement (exclude password from DB storage)
     const columns = ['airtable_record_id', 'airtable_created_time'];
     const values = [generateRecordId(), new Date().toISOString()];
     const placeholders = ['$1', '$2'];
     let paramIndex = 3;
     
     for (const [field, value] of Object.entries(fields)) {
+      // Don't store plain password in database
+      if (field === 'password') continue;
+      
       columns.push(`"${field}"`);
       values.push(typeof value === 'object' ? JSON.stringify(value) : value);
       placeholders.push(`$${paramIndex}`);
