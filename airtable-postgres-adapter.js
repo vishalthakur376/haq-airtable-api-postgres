@@ -27,6 +27,10 @@
 
 const { Client, Pool } = require('pg');
 
+// Schema configuration - configurable via env var, no code changes needed if schema moves
+const DB_SCHEMA_FILTER = (process.env.DB_SCHEMAS || 'scoring,public')
+  .split(',').map(s => `'${s.trim()}'`).join(', ');
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // AIRTABLE RECORD CLASS
 // Mimics Airtable record structure with .fields, .id, and .get() method
@@ -143,7 +147,7 @@ class AirtableQuery {
     const result = await client.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = $1 AND table_schema IN ('scoring', 'public')
+      WHERE table_name = $1 AND table_schema IN (${DB_SCHEMA_FILTER})
     `, [this.tableName]);
     
     // Build mapping: PostgreSQL column -> Airtable field name
@@ -430,7 +434,7 @@ class AirtableTable {
     const result = await client.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = $1 AND table_schema IN ('scoring', 'public')
+      WHERE table_name = $1 AND table_schema IN (${DB_SCHEMA_FILTER})
     `, [this.tableName]);
     
     const mapping = {};
