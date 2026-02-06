@@ -318,7 +318,35 @@ async function handleGet(pool, tableName, recordId, queryParams) {
     // Check if there are more records
     const hasMore = result.rows.length > maxRecords;
     const records = hasMore ? result.rows.slice(0, maxRecords) : result.rows;
-    
+
+    // Truncate large fields to stay within API Gateway 6MB payload limit
+    // JSON fields are parsed, trimmed, and re-stringified to stay valid
+    const TEXT_LIMIT = 3000;
+    const JSON_LIMIT = 2000;
+    for (const row of records) {
+      // Plain text: truncate directly
+      if (row.claude_response && typeof row.claude_response === 'string' && row.claude_response.length > TEXT_LIMIT) {
+        row.claude_response = row.claude_response.substring(0, TEXT_LIMIT) + '...[truncated]';
+      }
+      // JSON fields: parse, trim inner values, re-stringify
+      for (const field of ['recommendations_returned', 'extracted_params']) {
+        if (row[field] && typeof row[field] === 'string' && row[field].length > JSON_LIMIT) {
+          try {
+            const parsed = JSON.parse(row[field]);
+            // Keep structure but truncate long string values inside
+            const trimmed = JSON.stringify(parsed, (key, val) => {
+              if (typeof val === 'string' && val.length > 500) return val.substring(0, 500) + '...';
+              return val;
+            });
+            row[field] = trimmed;
+          } catch (e) {
+            // Not valid JSON, truncate as text
+            row[field] = row[field].substring(0, JSON_LIMIT) + '...[truncated]';
+          }
+        }
+      }
+    }
+
     // Build response
     const response = {
       records: records.map(rowToRecord)
