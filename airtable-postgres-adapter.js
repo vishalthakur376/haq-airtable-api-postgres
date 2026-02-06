@@ -143,7 +143,7 @@ class AirtableQuery {
     const result = await client.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = $1 AND table_schema = 'public'
+      WHERE table_name = $1 AND table_schema IN ('scoring', 'public')
     `, [this.tableName]);
     
     // Build mapping: PostgreSQL column -> Airtable field name
@@ -430,7 +430,7 @@ class AirtableTable {
     const result = await client.query(`
       SELECT column_name 
       FROM information_schema.columns 
-      WHERE table_name = $1 AND table_schema = 'public'
+      WHERE table_name = $1 AND table_schema IN ('scoring', 'public')
     `, [this.tableName]);
     
     const mapping = {};
